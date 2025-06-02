@@ -544,6 +544,41 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                 progress_bar.update(1)
                 self.global_steps += 1
+            # update the train_dataloader for the next epoch
+            if self.config.trainer.get('enable_dataset_update', False):     
+                # 1. filter epoch_records
+                dataset_metrics ={}
+                filter_min = self.config.trainer.get('filter_min', 0)
+                filter_max = self.config.trainer.get('filter_max', self.config.actor_rollout_ref.rollout.n)
+                epoch_records,replay_buffer = self._filter_epoch_record(epoch_records, filter_min, filter_max)
+                
+                # 2. write epoch_records to parquet
+                epoch_dir = self.config.trainer.get("default_local_dir", ".")
+                os.makedirs(epoch_dir, exist_ok=True)
+                epoch_file = os.path.join(epoch_dir, f"epoch_{epoch}_data.parquet")
+
+                replay_file = os.path.join(epoch_dir, f"replay_buffer.parquet")
+                local_replay_buffer = self._load_replay_buffer(replay_file)
+
+                next_replay_buffer = local_replay_buffer + replay_buffer
+
+                buffer_size = min(self.config.trainer.replay_buffer_size,len(next_replay_buffer))
+                epoch_records = epoch_records + next_replay_buffer[:buffer_size]
+                next_replay_buffer = next_replay_buffer[buffer_size:]
+
+                print(f"get buffer size {buffer_size} records from replay buffer.")
+                print(f"Left {len(epoch_records)} records after filtering.") 
+                print(f"Left {len(next_replay_buffer)} records in replay buffer.")
+                dataset_metrics["dataset/dataset_len"] = len(epoch_records)
+                logger.log(data=dataset_metrics, step=self.global_steps-1)
+                if len(epoch_records) == 0:
+                    return 
+
+                pd.DataFrame(next_replay_buffer).to_parquet(replay_file, index=False)
+                pd.DataFrame(epoch_records).to_parquet(epoch_file, index=False) 
+
+                # 3. update the train_dataloader
+                trainer_dataloader=self._create_new_dataloader([epoch_file])
     def _make_record_for_parquet(self, batch: DataProto, idx: int, metric_sum_val,step) -> dict:
         record = {"metric_sum": metric_sum_val}
         for k, v in batch.non_tensor_batch.items():
