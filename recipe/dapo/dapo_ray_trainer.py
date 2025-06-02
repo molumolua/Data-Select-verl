@@ -218,13 +218,13 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        # if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
-        #     val_metrics = self._validate()
-        #     assert val_metrics, f"{val_metrics=}"
-        #     pprint(f"Initial validation metrics: {val_metrics}")
-        #     logger.log(data=val_metrics, step=self.global_steps)
-        #     if self.config.trainer.get("val_only", False):
-        #         return
+        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+            val_metrics = self._validate()
+            assert val_metrics, f"{val_metrics=}"
+            pprint(f"Initial validation metrics: {val_metrics}")
+            logger.log(data=val_metrics, step=self.global_steps)
+            if self.config.trainer.get("val_only", False):
+                return
 
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
@@ -339,9 +339,8 @@ class RayDAPOTrainer(RayPPOTrainer):
                         else:
                             new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"]
 
-                    new_batch.batch["response_mask"] = compute_response_mask(new_batch)
-                    
 
+                    new_batch.batch["response_mask"] = compute_response_mask(new_batch)
                     if score_mode.startswith("entropy"):
                         with _timer("entropy_select", timing_raw):
                             old_log_prob = self.actor_rollout_wg.compute_log_prob(new_batch)
@@ -354,8 +353,6 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                             new_batch.non_tensor_batch["entropys_avg"] = avg_ent.cpu().numpy()
 
-
-                    
 
 
                     if not self.config.algorithm.filter_groups.enable:
@@ -391,9 +388,13 @@ class RayDAPOTrainer(RayPPOTrainer):
                             prompt_entropys_avg_list = defaultdict(list)
                             for uid, metric_val in zip(new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch["entropys_avg"]):
                                 prompt_entropys_avg_list[uid].append(metric_val)
-                            prompt_avg_entropys = {}
-                            for prompt_uid, entropys in prompt_entropys_avg_list.items():
-                                prompt_avg_entropys[prompt_uid] = sum(entropys) / len(entropys)
+                            prompt_entropys_metric = {}
+                            if score_mode=="entropy_max":
+                                for prompt_uid, entropys in prompt_entropys_avg_list.items():
+                                    prompt_entropys_metric[prompt_uid] = sum(entropys) / len(entropys)
+                            elif score_mode=="entropy_var":
+                                for prompt_uid, entropys in prompt_entropys_avg_list.items():
+                                    prompt_entropys_metric[prompt_uid] = np.var(entropys)
 
 
                         visit_prompt_uids = set()
@@ -411,15 +412,13 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 kept_traj_idxs.append(idx)
                                 if self.config.trainer.get('enable_var_select', False):
                                     if score_mode.startswith("entropy"):
-                                        score = prompt_avg_entropys[traj_from_prompt_uid]
+                                        score = prompt_entropys_metric[traj_from_prompt_uid]
                                         pid_var_dict[traj_from_prompt_uid] = score
                                     else:
                                         tmp_list = list(new_batch.non_tensor_batch['metric_list'][idx])
                                         tmp_list.append(metric_sum_val)
                                         score = sample_score(tmp_list,n=self.config.actor_rollout_ref.rollout.n,mode=score_mode)
                                         pid_var_dict[traj_from_prompt_uid] = score
-                        import pdb
-                        pdb.set_trace()
                         new_batch = new_batch[kept_traj_idxs]
                         if batch is None:
                             batch = new_batch
@@ -532,6 +531,8 @@ class RayDAPOTrainer(RayPPOTrainer):
                 batch = None
                 num_prompt_in_batch = 0
                 num_gen_batches = 0
+                if self.config.trainer.get('enable_var_select', False):
+                    pid_var_dict ={}
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
@@ -577,7 +578,6 @@ class RayDAPOTrainer(RayPPOTrainer):
                 pid_var_dict.items(), key=lambda kv: kv[1], reverse=True
             )[:dst_batch_size]
         ]
-
         selected_indices = [idx for idx, uid in enumerate(batch.non_tensor_batch['uid']) if uid in top_prompt_ids]
         assert dst_batch_size*n == len(selected_indices)
         new_batch = batch[selected_indices]

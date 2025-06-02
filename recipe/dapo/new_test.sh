@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euxo pipefail
-export CUDA_VISIBLE_DEVICES=6,7
+export CUDA_VISIBLE_DEVICES=2,3
 export RAY_TMPDIR="/data2/xucaijun/raytmp"
 
 offload=True
@@ -17,12 +17,12 @@ sum_min=1
 filter_max=7
 filter_min=0
 replay_size=192
-sort_prompt_bsz=64
+sort_prompt_bsz=96
 train_prompt_bsz=64
 gen_prompt_bsz=$((train_prompt_bsz * 3))
 train_prompt_mini_bsz=64
 
-#exp_name=${exp_name:-"${score_mode}-test-data-${enable_dataset_update}-select-${enable_var_select}-batch-size-${gen_prompt_bsz}-${sort_prompt_bsz}-${train_prompt_bsz}-${sum_min}-${sum_max}-${filter_min}-${filter_max}-replay-${replay_size}-Think-MATH-DAPO-Qwen2.5-7B"}
+exp_name=${exp_name:-"${score_mode}-test-data-${enable_dataset_update}-select-${enable_var_select}-batch-size-${gen_prompt_bsz}-${sort_prompt_bsz}-${train_prompt_bsz}-${sum_min}-${sum_max}-${filter_min}-${filter_max}-replay-${replay_size}-Think-MATH-DAPO-Qwen2.5-7B"}
 adv_estimator=grpo
 
 use_kl_in_reward=False
