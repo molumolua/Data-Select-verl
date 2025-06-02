@@ -218,13 +218,13 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
-            val_metrics = self._validate()
-            assert val_metrics, f"{val_metrics=}"
-            pprint(f"Initial validation metrics: {val_metrics}")
-            logger.log(data=val_metrics, step=self.global_steps)
-            if self.config.trainer.get("val_only", False):
-                return
+        # if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        #     val_metrics = self._validate()
+        #     assert val_metrics, f"{val_metrics=}"
+        #     pprint(f"Initial validation metrics: {val_metrics}")
+        #     logger.log(data=val_metrics, step=self.global_steps)
+        #     if self.config.trainer.get("val_only", False):
+        #         return
 
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
@@ -528,3 +528,48 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                 progress_bar.update(1)
                 self.global_steps += 1
+    def _make_record_for_parquet(self, batch: DataProto, idx: int, metric_sum_val,step) -> dict:
+        record = {"metric_sum": metric_sum_val}
+        for k, v in batch.non_tensor_batch.items():
+            if k in  ('reward_model',"data_source","extra_info"):
+                record[k] = v[idx]
+            if k == "raw_prompt":
+                record["prompt"] = v[idx].tolist()
+            if k == "metric_list":
+                tmp_list = list(v[idx])
+                if metric_sum_val !=None:
+                    tmp_list.append(metric_sum_val)
+                record[k] = tmp_list
+            if k == "step_list":
+                tmp_list = list(v[idx])
+                if step !=None:
+                    tmp_list.append(step)
+                record[k] = tmp_list
+        return record
+    def _filter_epoch_record(self, epoch_records: list[dict], filter_min,filter_max) -> list[dict]:
+        filtered_records = []
+        replay_buffer = []
+        for record in epoch_records:
+            if record['metric_sum'] == None or (record['metric_sum'] >=filter_min and record['metric_sum'] <= filter_max):
+                filtered_records.append(record)
+            else:
+                replay_buffer.append(record)
+        return filtered_records,replay_buffer
+    
+    def var_select(self, batch,n, dst_batch_size: int, pid_var_dict: dict):
+        top_prompt_ids = [
+            pid for pid, _ in sorted(
+                pid_var_dict.items(), key=lambda kv: kv[1], reverse=True
+            )[:dst_batch_size]
+        ]
+
+        selected_indices = [idx for idx, uid in enumerate(batch.non_tensor_batch['uid']) if uid in top_prompt_ids]
+        assert dst_batch_size*n == len(selected_indices)
+        new_batch = batch[selected_indices]
+        return new_batch
+
+
+    def _load_replay_buffer(self,path) -> list[dict]:
+        if os.path.exists(path):
+            return pd.read_parquet(path).to_dict(orient="records")
+        return []

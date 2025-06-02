@@ -403,7 +403,7 @@ class RayPPOTrainer:
             raise NotImplementedError
 
         self._validate_config()
-        self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+        self._create_dataloader()
 
     def _validate_config(self):
         config = self.config
@@ -518,7 +518,7 @@ class RayPPOTrainer:
 
         print("[validate_config] All configuration checks passed successfully!")
 
-    def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler):
+    def _create_dataloader(self, train_dataset=None, val_dataset=None, collate_fn=None, train_sampler=None):
         """
         Creates the train and validation dataloaders.
         """

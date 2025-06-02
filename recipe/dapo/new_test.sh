@@ -3,6 +3,9 @@ set -euxo pipefail
 export CUDA_VISIBLE_DEVICES=6,7
 export RAY_TMPDIR="/data2/xucaijun/raytmp"
 
+offload=True
+num_gpus=2
+
 epoch=1000
 score_mode="diff"
 project_name='DATA-select'
@@ -48,10 +51,10 @@ max_num_gen_batches=10
 # WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 # RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
 # Paths
-RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/DAPO_verl/verl"}
+RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/Data-Select-verl"}
 MODEL_PATH=${MODEL_PATH:-"/data2/models/Qwen/Qwen2.5-7B"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"/data2/xucaijun/DAPO_verl/verl/ckpts/DATA-select/diff-test-data-True-var-True-1-7-0-7-replay-192-Think-MATH-DAPO-Qwen2.5-7B/epoch_8_data.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"/data2/xucaijun/DAPO_verl/verl/data/think_MATH-lighteval_train-processed.parquet"}
 TEST_FILE=${TEST_FILE:-["/data2/xucaijun/DAPO_verl/verl/data/think_MATH-500_MATH-500-processed.parquet","/data2/xucaijun/DAPO_verl/verl/data/think_aime24_aime24_test.parquet","/data2/xucaijun/DAPO_verl/verl/data/think_amc23_amc23_test.parquet"]}
 
 # Algorithm
@@ -67,10 +70,8 @@ sp_size=1
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$((max_prompt_length + max_response_length))
 infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
-offload=True
-num_gpus=2
 
-PYTHONUNBUFFERED=1 python3 -m recipe.dapo.src.main_dapo \
+PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -117,7 +118,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.src.main_dapo \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${num_gpus} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
