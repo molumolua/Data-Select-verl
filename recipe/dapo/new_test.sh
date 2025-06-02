@@ -7,7 +7,7 @@ offload=True
 num_gpus=2
 
 epoch=1000
-score_mode="diff"
+score_mode="entropy_max"
 project_name='DATA-select'
 enable_dataset_update=True
 enable_var_select=True
@@ -23,7 +23,6 @@ gen_prompt_bsz=$((train_prompt_bsz * 3))
 train_prompt_mini_bsz=64
 
 #exp_name=${exp_name:-"${score_mode}-test-data-${enable_dataset_update}-select-${enable_var_select}-batch-size-${gen_prompt_bsz}-${sort_prompt_bsz}-${train_prompt_bsz}-${sum_min}-${sum_max}-${filter_min}-${filter_max}-replay-${replay_size}-Think-MATH-DAPO-Qwen2.5-7B"}
-exp_name=${exp_name:-"test"}
 adv_estimator=grpo
 
 use_kl_in_reward=False

@@ -339,6 +339,25 @@ class RayDAPOTrainer(RayPPOTrainer):
                         else:
                             new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"]
 
+                    new_batch.batch["response_mask"] = compute_response_mask(new_batch)
+                    
+
+                    if score_mode.startswith("entropy"):
+                        with _timer("entropy_select", timing_raw):
+                            old_log_prob = self.actor_rollout_wg.compute_log_prob(new_batch)
+                            entropys        = old_log_prob.batch["entropys"]        # [B, L]
+                            response_masks  = new_batch.batch["response_mask"]  # [B, L] 0/1
+
+                            ent_sum  = (entropys * response_masks).sum(dim=-1)                        # [B]
+                            tok_cnt  = response_masks.sum(dim=-1).clamp(min=1)                        # [B]
+                            avg_ent  = ent_sum / tok_cnt                                              # [B]
+
+                            new_batch.non_tensor_batch["entropys_avg"] = avg_ent.cpu().numpy()
+
+
+                    
+
+
                     if not self.config.algorithm.filter_groups.enable:
                         batch = new_batch
                     else:  # NOTE: When prompts after filtering is less than train batch size,
@@ -355,21 +374,6 @@ class RayDAPOTrainer(RayPPOTrainer):
                         for uid, metric_val in zip(new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch[metric_name]):
                             prompt_uid2metric_vals[uid].append(metric_val)
 
-                        # Collect the sequence reward for each trajectory
-                        prompt_uid2metric_vals = defaultdict(list)
-                        for uid, metric_val in zip(new_batch.non_tensor_batch['uid'],
-                                                   new_batch.non_tensor_batch[metric_name]):
-                            prompt_uid2metric_vals[uid].append(metric_val)
-
-                        # prompt_uid2metric_std = {}
-                        # for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
-                        #     prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
-
-                        # std_min=self.config.trainer.get('std_min', 0.0)
-                        # kept_prompt_uids = [
-                        #     uid for uid, std in prompt_uid2metric_std.items()
-                        #     if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
-                        # ]
 
                         prompt_uid2metric_sum = {}
                         for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
@@ -383,6 +387,13 @@ class RayDAPOTrainer(RayPPOTrainer):
                         ]
                         num_prompt_in_batch += len(kept_prompt_uids)
 
+                        if score_mode.startswith("entropy"):
+                            prompt_entropys_avg_list = defaultdict(list)
+                            for uid, metric_val in zip(new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch["entropys_avg"]):
+                                prompt_entropys_avg_list[uid].append(metric_val)
+                            prompt_avg_entropys = {}
+                            for prompt_uid, entropys in prompt_entropys_avg_list.items():
+                                prompt_avg_entropys[prompt_uid] = sum(entropys) / len(entropys)
 
 
                         visit_prompt_uids = set()
@@ -399,11 +410,16 @@ class RayDAPOTrainer(RayPPOTrainer):
                             if traj_from_prompt_uid in kept_prompt_uids:
                                 kept_traj_idxs.append(idx)
                                 if self.config.trainer.get('enable_var_select', False):
-                                    tmp_list = list(new_batch.non_tensor_batch['metric_list'][idx])
-                                    tmp_list.append(metric_sum_val)
-                                    score = sample_score(tmp_list,n=self.config.actor_rollout_ref.rollout.n,mode=score_mode)
-                                    pid_var_dict[traj_from_prompt_uid] = score
-
+                                    if score_mode.startswith("entropy"):
+                                        score = prompt_avg_entropys[traj_from_prompt_uid]
+                                        pid_var_dict[traj_from_prompt_uid] = score
+                                    else:
+                                        tmp_list = list(new_batch.non_tensor_batch['metric_list'][idx])
+                                        tmp_list.append(metric_sum_val)
+                                        score = sample_score(tmp_list,n=self.config.actor_rollout_ref.rollout.n,mode=score_mode)
+                                        pid_var_dict[traj_from_prompt_uid] = score
+                        import pdb
+                        pdb.set_trace()
                         new_batch = new_batch[kept_traj_idxs]
                         if batch is None:
                             batch = new_batch
@@ -431,7 +447,6 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                     # === Updating ===
 
-                    batch.batch["response_mask"] = compute_response_mask(batch)
 
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
@@ -441,7 +456,7 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-
+ 
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
