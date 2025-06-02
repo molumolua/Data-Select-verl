@@ -17,26 +17,178 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import uuid
-from collections import defaultdict
-from copy import deepcopy
 from pprint import pprint
-
+from copy import deepcopy
+from collections import defaultdict
+from tqdm import tqdm
 import numpy as np
 import torch
-from tqdm import tqdm
+
+import os
+import pandas as pd
+from omegaconf import OmegaConf, open_dict
 
 from verl import DataProto
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer, _timer, apply_kl_penalty, compute_advantage, AdvantageEstimator
+from verl.trainer.ppo.metric_utils import (compute_data_metrics, compute_throughout_metrics, compute_timing_metrics,
+                                           reduce_metrics)
 from verl.trainer.ppo.core_algos import agg_loss
-from verl.trainer.ppo.metric_utils import (
-    compute_data_metrics,
-    compute_throughout_metrics,
-    compute_timing_metrics,
-    reduce_metrics,
-)
 from verl.trainer.ppo.ray_trainer import AdvantageEstimator, RayPPOTrainer, _timer, apply_kl_penalty, compute_advantage, compute_response_mask
+from verl.utils.dataset.rl_dataset import RLHFDataset
+from torch.utils.data import Dataset, RandomSampler, SequentialSampler
+from torchdata.stateful_dataloader import StatefulDataLoader
+def as_obj_vector(seq_of_lists):
+    out = np.empty(len(seq_of_lists), dtype=object)
+    for i, item in enumerate(seq_of_lists):
+        out[i] = list(item)
+    return out
+def collate_fn(data_list: list[dict]) -> dict:
+    tensors = defaultdict(list)
+    non_tensors = defaultdict(list)
 
+    for data in data_list:
+        for key, val in data.items():
+            if isinstance(val, torch.Tensor):
+                tensors[key].append(val)
+            else:
+                non_tensors[key].append(val)
+
+    for key, val in tensors.items():
+        tensors[key] = torch.stack(val, dim=0)
+
+    for key, val in non_tensors.items():
+        if (key == "metric_list" or key == "step_list"):
+            non_tensors[key] = as_obj_vector(val)
+        else:
+            non_tensors[key] = np.array(val, dtype=object)
+
+    return {**tensors, **non_tensors}
+
+def sample_score(arr, n,beta=0.5, eps=0.1,mode="var"):
+    #高分优先
+    arr = np.asarray(arr, dtype=np.float32)
+    if mode == "var":
+        if len(arr) <2:
+            return n
+        var = np.var(arr) / (n**2) 
+        return var   #优先算方差最大的
+    elif mode == "max":
+        return arr[-1]
+    elif mode == "min":
+        return -arr[-1]
+    elif mode == "mean":
+        if len(arr) <2:
+            return n
+        return - abs(n/2 - arr[-1])  #优先算reward最靠近中间的
+    elif mode == "diff":
+        # 学习 or 遗忘
+        if len(arr) < 2:
+            return n
+        mean = np.mean(arr[:-1])
+        diff = abs(arr[-1] - mean) #优先算能够使得方差变化最大的
+        return diff
+    else:
+        var = np.var(arr) / (n**2) 
+        inv_len = 1.0 / (len(arr) + eps)
+        return (var + eps) ** beta * (inv_len + eps) ** (1 - beta)
 
 class RayDAPOTrainer(RayPPOTrainer):
+    def _create_dataloader(self):
+        # TODO: we have to make sure the batch size is divisible by the dp size
+        from verl.utils.import_utils import load_extern_type
+        if "custom_cls" in self.config.data and self.config.data.custom_cls.get("path", None) is not None:
+            dataset_cls = load_extern_type(self.config.data.custom_cls.path, self.config.data.custom_cls.name)
+            if not issubclass(dataset_cls, Dataset):
+                raise TypeError(f"The custom dataset class '{self.config.data.custom_cls.name}' from "
+                                f"'{self.config.data.custom_cls.path}' must inherit from torch.utils.data.Dataset")
+        else:
+            dataset_cls = RLHFDataset
+
+        self.train_dataset = dataset_cls(
+            data_files=self.config.data.train_files,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            config=self.config.data,
+        )
+
+        # use sampler for better ckpt resume
+        if self.config.data.shuffle:
+            train_dataloader_generator = torch.Generator()
+            train_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
+            sampler = RandomSampler(data_source=self.train_dataset, generator=train_dataloader_generator)
+        else:
+            sampler = SequentialSampler(data_source=self.train_dataset)
+
+        self.train_dataloader = StatefulDataLoader(dataset=self.train_dataset,
+                                                   batch_size=self.config.data.get('gen_batch_size',
+                                                                                   self.config.data.train_batch_size),
+                                                   num_workers=8,
+                                                   drop_last=False,
+                                                   collate_fn=collate_fn,
+                                                   sampler=sampler)
+
+        self.val_dataset = dataset_cls(
+            data_files=self.config.data.val_files,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            config=self.config.data,
+        )
+        self.val_dataloader = StatefulDataLoader(
+            dataset=self.val_dataset,
+            # Validation datasets are sent to inference engines as a whole batch,
+            # which will schedule the memory themselves.
+            batch_size=len(self.val_dataset),
+            num_workers=8,
+            shuffle=False,
+            drop_last=False,
+            collate_fn=collate_fn)
+
+        assert len(self.train_dataloader) >= 1
+        assert len(
+            self.val_dataloader
+        ) == 1, "Validation dataloader must have a single batch, which inference engines will schedule the memory themselves."
+
+        print(f'Size of train dataloader: {len(self.train_dataloader)}')
+
+        # inject total_training_steps to actor/critic optim_config. This is hacky.
+        total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+
+        if self.config.trainer.total_training_steps is not None:
+            total_training_steps = self.config.trainer.total_training_steps
+
+        self.total_training_steps = total_training_steps
+        print(f'Total training steps: {self.total_training_steps}')
+
+        OmegaConf.set_struct(self.config, True)
+        with open_dict(self.config):
+            self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+            self.config.critic.optim.total_training_steps = total_training_steps
+
+    def _create_new_dataloader(self, data_files):
+        print("create train dataloader......")
+        train_dataset = RLHFDataset(
+            data_files=data_files,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            config=self.config.data,
+        )
+
+
+        # use sampler for better ckpt resume
+        if self.config.data.shuffle:
+            train_dataloader_generator = torch.Generator()
+            train_dataloader_generator.manual_seed(self.config.data.get('seed', 1))
+            sampler = RandomSampler(data_source=train_dataset, generator=train_dataloader_generator)
+        else:
+            sampler = SequentialSampler(data_source=train_dataset)
+
+        return StatefulDataLoader(dataset=train_dataset,
+                                batch_size=self.config.data.get('gen_batch_size',
+                                                self.config.data.train_batch_size),
+                                                   num_workers=8,
+                                                   drop_last=False,
+                                                   collate_fn=collate_fn,
+                                                   sampler=sampler)
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
     """
@@ -60,7 +212,7 @@ class RayDAPOTrainer(RayPPOTrainer):
         )
 
         self.global_steps = 0
-
+        batch_size=self.config.data.get('gen_batch_size',self.config.data.train_batch_size)
         # load checkpoint before doing anything
         self._load_checkpoint()
 
@@ -83,13 +235,36 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         timing_raw = defaultdict(float)
         batch = None
+        if self.config.trainer.get('enable_var_select', False):
+            pid_var_dict ={}
         num_prompt_in_batch = 0
         num_gen_batches = 0
+
+        #self.train_dataloader.next_iter_state = None
+        trainer_dataloader = self.train_dataloader
+        score_mode= self.config.trainer.get('score_mode', 'var')
         for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+            if self.config.trainer.get('enable_dataset_update', False):
+                epoch_records = []
+            for batch_dict in trainer_dataloader:
                 metrics = {}
 
                 new_batch: DataProto = DataProto.from_single_dict(batch_dict)
+                # last step and get a small batch size of test_size < batch_size, we append the batch to the epoch_records and use for the next epoch
+                test_size = len(new_batch.non_tensor_batch['raw_prompt'])
+                if test_size <batch_size:
+                    print(f"last step and get a small batch size of {test_size} < {batch_size}")
+                    if self.config.trainer.get('enable_dataset_update', False):
+                        for idx in range(test_size):
+                            epoch_records.append(
+                                self._make_record_for_parquet(
+                                    new_batch, idx, None,None
+                                )
+                            )
+                    continue
+
+                metrics = {}
+
                 num_gen_batches += 1
                 # pop those keys for generation
                 if "multi_modal_data" in new_batch.non_tensor_batch.keys():
@@ -180,24 +355,65 @@ class RayDAPOTrainer(RayPPOTrainer):
                         for uid, metric_val in zip(new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch[metric_name]):
                             prompt_uid2metric_vals[uid].append(metric_val)
 
-                        prompt_uid2metric_std = {}
-                        for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
-                            prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
+                        # Collect the sequence reward for each trajectory
+                        prompt_uid2metric_vals = defaultdict(list)
+                        for uid, metric_val in zip(new_batch.non_tensor_batch['uid'],
+                                                   new_batch.non_tensor_batch[metric_name]):
+                            prompt_uid2metric_vals[uid].append(metric_val)
 
-                        kept_prompt_uids = [uid for uid, std in prompt_uid2metric_std.items() if std > 0 or len(prompt_uid2metric_vals[uid]) == 1]
+                        # prompt_uid2metric_std = {}
+                        # for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
+                        #     prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
+
+                        # std_min=self.config.trainer.get('std_min', 0.0)
+                        # kept_prompt_uids = [
+                        #     uid for uid, std in prompt_uid2metric_std.items()
+                        #     if std > 0 or len(prompt_uid2metric_vals[uid]) == 1
+                        # ]
+
+                        prompt_uid2metric_sum = {}
+                        for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
+                            prompt_uid2metric_sum[prompt_uid] = sum(metric_vals)
+                        sum_max=self.config.trainer.get('sum_max', self.config.actor_rollout_ref.rollout.n-1)
+                        sum_min=self.config.trainer.get('sum_min', 1)
+                        kept_prompt_uids = [
+                            uid for uid, prompt_sum in prompt_uid2metric_sum.items()
+                            if (prompt_sum >= sum_min and 
+                                prompt_sum <= sum_max) or len(prompt_uid2metric_vals[uid]) == 1
+                        ]
                         num_prompt_in_batch += len(kept_prompt_uids)
 
+
+
+                        visit_prompt_uids = set()
                         kept_traj_idxs = []
-                        for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch["uid"]):
+                        for idx, traj_from_prompt_uid in enumerate(new_batch.non_tensor_batch['uid']):
+                            metric_sum_val = prompt_uid2metric_sum[traj_from_prompt_uid]
+                            if self.config.trainer.get('enable_dataset_update', False) and (traj_from_prompt_uid not in visit_prompt_uids):
+                                epoch_records.append(
+                                    self._make_record_for_parquet(
+                                        new_batch, idx, metric_sum_val,self.global_steps
+                                    )
+                                )
+                                visit_prompt_uids.add(traj_from_prompt_uid)
                             if traj_from_prompt_uid in kept_prompt_uids:
                                 kept_traj_idxs.append(idx)
+                                if self.config.trainer.get('enable_var_select', False):
+                                    tmp_list = list(new_batch.non_tensor_batch['metric_list'][idx])
+                                    tmp_list.append(metric_sum_val)
+                                    score = sample_score(tmp_list,n=self.config.actor_rollout_ref.rollout.n,mode=score_mode)
+                                    pid_var_dict[traj_from_prompt_uid] = score
 
                         new_batch = new_batch[kept_traj_idxs]
-                        batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
+                        if batch is None:
+                            batch = new_batch
+                        else:
+                            batch = DataProto.concat([batch, new_batch])
 
                         prompt_bsz = self.config.data.train_batch_size
-                        if num_prompt_in_batch < prompt_bsz:
-                            print(f"{num_prompt_in_batch=} < {prompt_bsz=}")
+                        sort_prompt_bsz = self.config.data.get('sort_prompt_bsz',prompt_bsz)
+                        if num_prompt_in_batch < sort_prompt_bsz:
+                            print(f"{num_prompt_in_batch=} < {sort_prompt_bsz=}")
                             max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
                             if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
                                 print(f"{num_gen_batches=}. Keep generating...")
@@ -206,8 +422,12 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 raise ValueError(f"{num_gen_batches=} >= {max_num_gen_batches=}." + " Generated too many. Please check if your data are too difficult." + " You could also try set max_num_gen_batches=0 to enable endless trials.")
                         else:
                             # Align the batch
-                            traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
-                            batch = batch[:traj_bsz]
+                            if self.config.trainer.get('enable_var_select', False):
+                                n_roll=self.config.actor_rollout_ref.rollout.n
+                                batch = self.var_select(batch,n=n_roll,dst_batch_size=prompt_bsz,pid_var_dict=pid_var_dict)
+                            else:
+                                traj_bsz = prompt_bsz * self.config.actor_rollout_ref.rollout.n
+                                batch = batch[:traj_bsz]
 
                     # === Updating ===
 
