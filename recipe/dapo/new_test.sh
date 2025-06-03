@@ -1,28 +1,31 @@
 #!/usr/bin/env bash
 set -euxo pipefail
-export CUDA_VISIBLE_DEVICES=2,3
+export CUDA_VISIBLE_DEVICES=4,5
 export RAY_TMPDIR="/data2/xucaijun/raytmp"
 
 offload=True
 num_gpus=2
+test_and_save_freq=10
+lr_warmup_steps=0
 
 epoch=1000
 score_mode="entropy_max"
 project_name='DATA-select'
 enable_dataset_update=True
-enable_var_select=True
+enable_var_select=False
 n_resp_per_prompt=8  #采样次数
-sum_max=7
-sum_min=1
-filter_max=7
+sum_max=8
+sum_min=0
+filter_max=8
 filter_min=0
 replay_size=192
-sort_prompt_bsz=96
+sort_prompt_bsz=64
 train_prompt_bsz=64
-gen_prompt_bsz=$((train_prompt_bsz * 3))
+gen_prompt_bsz=$((train_prompt_bsz))
 train_prompt_mini_bsz=64
 
-exp_name=${exp_name:-"${score_mode}-test-data-${enable_dataset_update}-select-${enable_var_select}-batch-size-${gen_prompt_bsz}-${sort_prompt_bsz}-${train_prompt_bsz}-${sum_min}-${sum_max}-${filter_min}-${filter_max}-replay-${replay_size}-Think-MATH-DAPO-Qwen2.5-7B"}
+#exp_name=${exp_name:-"${score_mode}-test-data-${enable_dataset_update}-select-${enable_var_select}-batch-size-${gen_prompt_bsz}-${sort_prompt_bsz}-${train_prompt_bsz}-${sum_min}-${sum_max}-${filter_min}-${filter_max}-replay-${replay_size}-Think-MATH-DAPO-Qwen2.5-7B"}
+exp_name=${exp_name:-"Test"}
 adv_estimator=grpo
 
 use_kl_in_reward=False
@@ -31,7 +34,7 @@ use_kl_loss=False
 kl_loss_coef=0.0
 
 clip_ratio_low=0.2
-clip_ratio_high=0.28
+clip_ratio_high=0.4
 
 max_prompt_length=$((1024 ))
 max_response_length=$((1024 * 7))
@@ -108,7 +111,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
+    actor_rollout_ref.actor.optim.lr_warmup_steps=${lr_warmup_steps} \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
@@ -142,8 +145,8 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     trainer.n_gpus_per_node="${num_gpus}" \
     trainer.nnodes=1 \
     trainer.val_before_train=True \
-    trainer.test_freq=5 \
-    trainer.save_freq=5 \
+    trainer.test_freq=${test_and_save_freq} \
+    trainer.save_freq=${test_and_save_freq} \
     trainer.total_epochs=${epoch} \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
