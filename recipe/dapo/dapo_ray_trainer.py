@@ -541,9 +541,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
-                # logger.log(data=add_prefix_in_dict(metrics, "sample_steps/"), step=sample_steps)
-                # wall_sec = int(time.perf_counter() - t0)
-                # logger.log(data=add_prefix_in_dict(metrics, "spend_time/"), step=wall_sec)
+                logger.log(data=add_prefix_in_dict(metrics, "sample_steps/"), step=sample_steps)
+                wall_sec = int(time.perf_counter() - t0)
+                logger.log(data=add_prefix_in_dict(metrics, "spend_time/"), step=wall_sec)
 
                 if is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")
