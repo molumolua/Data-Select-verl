@@ -23,7 +23,7 @@ from collections import defaultdict
 from tqdm import tqdm
 import numpy as np
 import torch
-
+import time 
 import os
 import pandas as pd
 from omegaconf import OmegaConf, open_dict
@@ -37,6 +37,10 @@ from verl.trainer.ppo.ray_trainer import AdvantageEstimator, RayPPOTrainer, _tim
 from verl.utils.dataset.rl_dataset import RLHFDataset
 from torch.utils.data import Dataset, RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
+
+def add_prefix_in_dict(d: dict, prefix: str) -> dict:
+    return {f"{prefix}{k}": v for k, v in d.items()}
+
 def as_obj_vector(seq_of_lists):
     out = np.empty(len(seq_of_lists), dtype=object)
     for i, item in enumerate(seq_of_lists):
@@ -210,7 +214,8 @@ class RayDAPOTrainer(RayPPOTrainer):
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
-
+        sample_steps=0
+        t0 = time.perf_counter()
         self.global_steps = 0
         batch_size=self.config.data.get('gen_batch_size',self.config.data.train_batch_size)
         # load checkpoint before doing anything
@@ -218,13 +223,13 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        # if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
-        #     val_metrics = self._validate()
-        #     assert val_metrics, f"{val_metrics=}"
-        #     pprint(f"Initial validation metrics: {val_metrics}")
-        #     logger.log(data=val_metrics, step=self.global_steps)
-        #     if self.config.trainer.get("val_only", False):
-        #         return
+        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+            val_metrics = self._validate()
+            assert val_metrics, f"{val_metrics=}"
+            pprint(f"Initial validation metrics: {val_metrics}")
+            logger.log(data=val_metrics, step=self.global_steps)
+            if self.config.trainer.get("val_only", False):
+                return
 
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
@@ -264,7 +269,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                     continue
 
                 metrics = {}
-
+                sample_steps    +=1
                 num_gen_batches += 1
                 # pop those keys for generation
                 if "multi_modal_data" in new_batch.non_tensor_batch.keys():
@@ -535,6 +540,10 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
+
+                # logger.log(data=add_prefix_in_dict(metrics, "sample_steps/"), step=sample_steps)
+                # wall_sec = int(time.perf_counter() - t0)
+                # logger.log(data=add_prefix_in_dict(metrics, "spend_time/"), step=wall_sec)
 
                 if is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")

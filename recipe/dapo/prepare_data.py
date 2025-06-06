@@ -5,6 +5,7 @@ import pandas as pd
 from verl.utils.reward_score.math import *
 from verl.utils.reward_score.math_dapo import normalize_final_answer
 import json
+import random
 def load_json(path):
     with open (path, 'r', encoding='utf-8') as f:
         data = json.load(f)
@@ -58,11 +59,13 @@ def prepare_question(question,prompt_type="TEST"):
     return prompt_list
 
 if __name__ == "__main__":
-    data_source = "think_aime24"  # "think_MATH-500" or "dapo_MATH-500"
-    repeat_time= 16
+    keep_size=5000
+    data_source = f"think_deepmath_{keep_size}"  # "think_MATH-500" or "dapo_MATH-500"
+    repeat_time= 1
+    random.seed(1)  # For reproducibility
     # 加载数据集的 train 部分
-    # dataset = load_dataset("DigitalLearningGmbH/MATH-lighteval", split="train")
-    # save_path = f"/data2/xucaijun/DAPO_verl/verl/data/think_test-200_train-processed.parquet"
+    # dataset = load_dataset("zwhe99/DeepMath-103K",split="train")
+    # save_path = f"/data2/xucaijun/DAPO_verl/verl/data/think-DeepMath-103K.parquet"
     # dataset = load_dataset("HuggingFaceH4/MATH-500",split="test")
     # save_path = f"/data2/xucaijun/DAPO_verl/verl/data/{data_source}_MATH-500-processed.parquet"
     # dataset = load_json("/data2/xucaijun/My-Math-Generator/outputs/7b_rejected_first_filter_1-4.json")
@@ -70,14 +73,20 @@ if __name__ == "__main__":
     # dataset = load_jsonl("/data2/xucaijun/My-Math-Generator/data/amc23/test.jsonl")
     # save_path = f"/data2/xucaijun/DAPO_verl/verl/data/{data_source}_amc23_test.parquet"
 
-    dataset =load_jsonl("/data2/xucaijun/My-Math-Generator/data/aime24/test.jsonl")
-    save_path = f"/data2/xucaijun/DAPO_verl/verl/data/{data_source}_aime24_test.parquet"
+    # dataset =load_jsonl("/data2/xucaijun/My-Math-Generator/data/aime24/test.jsonl")
+    # save_path = f"/data2/xucaijun/DAPO_verl/verl/data/{data_source}_aime24_test.parquet"
+
+    # df = pd.read_parquet(f"/data2/xucaijun/DAPO_verl/verl/data/think-DeepMath-103K.parquet")
+    # dataset = df.to_dict(orient="records") 
+    dataset = load_dataset("zwhe99/DeepMath-103K",split="train")
+    save_path = f"/data2/xucaijun/DAPO_verl/verl/data/think-DeepMath-{keep_size}.parquet"
+
     processed_data = []
 
     for i,item in enumerate(dataset):
-        question = item['problem']  # Extract the problem
+        question = item['question']  # Extract the problem
         # solution = item['solution']  # Extract the solution
-        solution = f"\\boxed{{{item['answer']}}}"  # Add boxed to the solution
+        solution = f"\\boxed{{{item['final_answer']}}}"  # Add boxed to the solution
         # Generate the prompt and answer
         prompt = prepare_question(question,prompt_type=data_source)
         answer = extract_answer(solution,extract_type=data_source)
@@ -97,7 +106,9 @@ if __name__ == "__main__":
             "step_list":[],
             "metric_sum":0
         })
-    processed_data = processed_data[:200]
+    if keep_size:
+        random.shuffle(processed_data)
+        processed_data = processed_data[:keep_size]
     processed_data = processed_data * repeat_time
     processed_df = pd.DataFrame(processed_data)
     processed_df.to_parquet(save_path)

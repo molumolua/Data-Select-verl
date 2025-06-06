@@ -1,31 +1,33 @@
 #!/usr/bin/env bash
 set -euxo pipefail
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES=2,3
 export RAY_TMPDIR="/data2/xucaijun/raytmp"
 
-offload=True
+dataset_name="think-DeepMath-103K"
+model_name="Qwen2.5-7B"
+offload=False
 num_gpus=2
-test_and_save_freq=10
+test_and_save_freq=5
 lr_warmup_steps=0
-
+entropy_coeff=0
 epoch=1000
-score_mode="entropy_max"
-project_name='DATA-select'
+score_mode="None"
+project_name='Epoch-filter'
 enable_dataset_update=True
 enable_var_select=False
 n_resp_per_prompt=8  #采样次数
-sum_max=8
-sum_min=0
-filter_max=8
+sum_max=7
+sum_min=1
+filter_max=7
 filter_min=0
-replay_size=192
+replay_size=0
 sort_prompt_bsz=64
 train_prompt_bsz=64
-gen_prompt_bsz=$((train_prompt_bsz))
+gen_prompt_bsz=192
 train_prompt_mini_bsz=64
 
-#exp_name=${exp_name:-"${score_mode}-test-data-${enable_dataset_update}-select-${enable_var_select}-batch-size-${gen_prompt_bsz}-${sort_prompt_bsz}-${train_prompt_bsz}-${sum_min}-${sum_max}-${filter_min}-${filter_max}-replay-${replay_size}-Think-MATH-DAPO-Qwen2.5-7B"}
-exp_name=${exp_name:-"Test"}
+exp_name=${exp_name:-"${score_mode}-test-data-${enable_dataset_update}-select-${enable_var_select}-batch-size-${gen_prompt_bsz}-${sort_prompt_bsz}-${train_prompt_bsz}-${sum_min}-${sum_max}-${filter_min}-${filter_max}-replay-${replay_size}-entropy_coeff-${entropy_coeff}-dataset-${dataset_name}-model-${model_name}"}
+# exp_name=${exp_name:-"Test"}
 adv_estimator=grpo
 
 use_kl_in_reward=False
@@ -34,7 +36,7 @@ use_kl_loss=False
 kl_loss_coef=0.0
 
 clip_ratio_low=0.2
-clip_ratio_high=0.4
+clip_ratio_high=0.28
 
 max_prompt_length=$((1024 ))
 max_response_length=$((1024 * 7))
@@ -43,7 +45,6 @@ overlong_buffer_len=$((1024))
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
-
 enable_filter_groups=True
 filter_groups_metric=acc
 max_num_gen_batches=10
@@ -54,9 +55,9 @@ max_num_gen_batches=10
 # RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
 # Paths
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/Data-Select-verl"}
-MODEL_PATH=${MODEL_PATH:-"/data2/models/Qwen/Qwen2.5-7B"}
+MODEL_PATH=${MODEL_PATH:-"/data2/models/Qwen/${model_name}"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"/data2/xucaijun/DAPO_verl/verl/data/think_MATH-lighteval_train-processed.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"/data2/xucaijun/DAPO_verl/verl/data/${dataset_name}.parquet"}
 TEST_FILE=${TEST_FILE:-["/data2/xucaijun/DAPO_verl/verl/data/think_MATH-500_MATH-500-processed.parquet","/data2/xucaijun/DAPO_verl/verl/data/think_aime24_aime24_test.parquet","/data2/xucaijun/DAPO_verl/verl/data/think_amc23_amc23_test.parquet"]}
 
 # Algorithm
@@ -116,11 +117,11 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${offload} \
-    actor_rollout_ref.actor.entropy_coeff=0 \
+    actor_rollout_ref.actor.entropy_coeff=${entropy_coeff} \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${num_gpus} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
