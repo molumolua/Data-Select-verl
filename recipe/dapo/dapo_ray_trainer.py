@@ -37,6 +37,7 @@ from verl.trainer.ppo.ray_trainer import AdvantageEstimator, RayPPOTrainer, _tim
 from verl.utils.dataset.rl_dataset import RLHFDataset
 from torch.utils.data import Dataset, RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
+import math
 
 def add_prefix_in_dict(d: dict, prefix: str) -> dict:
     return {f"{prefix}{k}": v for k, v in d.items()}
@@ -61,7 +62,7 @@ def collate_fn(data_list: list[dict]) -> dict:
         tensors[key] = torch.stack(val, dim=0)
 
     for key, val in non_tensors.items():
-        if (key == "metric_list" or key == "step_list"):
+        if (key == "metric_list" or key == "step_list" or key == "entropy_list"):
             non_tensors[key] = as_obj_vector(val)
         else:
             non_tensors[key] = np.array(val, dtype=object)
@@ -223,13 +224,13 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
-            val_metrics = self._validate()
-            assert val_metrics, f"{val_metrics=}"
-            pprint(f"Initial validation metrics: {val_metrics}")
-            logger.log(data=val_metrics, step=self.global_steps)
-            if self.config.trainer.get("val_only", False):
-                return
+        # if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        #     val_metrics = self._validate()
+        #     assert val_metrics, f"{val_metrics=}"
+        #     pprint(f"Initial validation metrics: {val_metrics}")
+        #     logger.log(data=val_metrics, step=self.global_steps)
+        #     if self.config.trainer.get("val_only", False):
+        #         return
 
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
@@ -263,7 +264,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                         for idx in range(test_size):
                             epoch_records.append(
                                 self._make_record_for_parquet(
-                                    new_batch, idx, None,None
+                                    new_batch, idx, None,None,None
                                 )
                             )
                     continue
@@ -348,15 +349,17 @@ class RayDAPOTrainer(RayPPOTrainer):
                     new_batch.batch["response_mask"] = compute_response_mask(new_batch)
                     if score_mode.startswith("entropy"):
                         with _timer("entropy_select", timing_raw):
-                            old_log_prob = self.actor_rollout_wg.compute_log_prob(new_batch)
-                            entropys        = old_log_prob.batch["entropys"]        # [B, L]
+                            # old_log_prob = self.actor_rollout_wg.compute_log_prob(new_batch)
+                            # entropys        = old_log_prob.batch["entropys"]        # [B, L]
                             response_masks  = new_batch.batch["response_mask"]  # [B, L] 0/1
 
-                            ent_sum  = (entropys * response_masks).sum(dim=-1)                        # [B]
+                            # ent_sum  = (entropys * response_masks).sum(dim=-1)                        # [B]
                             tok_cnt  = response_masks.sum(dim=-1).clamp(min=1)                        # [B]
-                            avg_ent  = ent_sum / tok_cnt                                              # [B]
+                            # avg_ent  = ent_sum / tok_cnt                                              # [B]
 
-                            new_batch.non_tensor_batch["entropys_avg"] = avg_ent.cpu().numpy()
+                            # new_batch.non_tensor_batch["entropys_avg"] = avg_ent.cpu().numpy()
+
+                            new_batch.non_tensor_batch['entropys_avg'] = tok_cnt.cpu().numpy() 
 
 
                     if not self.config.algorithm.filter_groups.enable:
@@ -408,7 +411,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                             if self.config.trainer.get('enable_dataset_update', False) and (traj_from_prompt_uid not in visit_prompt_uids):
                                 epoch_records.append(
                                     self._make_record_for_parquet(
-                                        new_batch, idx, metric_sum_val,self.global_steps
+                                        new_batch, idx, metric_sum_val,self.global_steps,new_batch.non_tensor_batch["entropys_avg"][idx] if score_mode.startswith("entropy") else None
                                     )
                                 )
                                 visit_prompt_uids.add(traj_from_prompt_uid)
@@ -586,8 +589,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                 pd.DataFrame(epoch_records).to_parquet(epoch_file, index=False) 
 
                 # 3. update the train_dataloader
-                trainer_dataloader=self._create_new_dataloader([epoch_file])
-    def _make_record_for_parquet(self, batch: DataProto, idx: int, metric_sum_val,step) -> dict:
+                epoch_repeat = math.ceil(self.config.data.train_batch_size / len(epoch_records))
+                trainer_dataloader=self._create_new_dataloader([epoch_file]*epoch_repeat)
+    def _make_record_for_parquet(self, batch: DataProto, idx: int, metric_sum_val,step,avg_entorpy) -> dict:
         record = {"metric_sum": metric_sum_val}
         for k, v in batch.non_tensor_batch.items():
             if k in  ('reward_model',"data_source","extra_info"):
@@ -603,6 +607,11 @@ class RayDAPOTrainer(RayPPOTrainer):
                 tmp_list = list(v[idx])
                 if step !=None:
                     tmp_list.append(step)
+                record[k] = tmp_list
+            if k == "entropy_list":
+                tmp_list = list(v[idx])
+                if avg_entorpy !=None:
+                    tmp_list.append(avg_entorpy)
                 record[k] = tmp_list
         return record
     def _filter_epoch_record(self, epoch_records: list[dict], filter_min,filter_max) -> list[dict]:

@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euxo pipefail
-export CUDA_VISIBLE_DEVICES=2,3
+export CUDA_VISIBLE_DEVICES=4,5
 export RAY_TMPDIR="/data2/xucaijun/raytmp"
 
-dataset_name="think-DeepMath-103K"
+dataset_name="think-MATH-3000"
 model_name="Qwen2.5-7B"
-offload=False
+offload=True
 num_gpus=2
-test_and_save_freq=5
+test_and_save_freq=10
 lr_warmup_steps=0
 entropy_coeff=0
 epoch=1000
 score_mode="None"
-project_name='Epoch-filter'
+project_name='New-Epoch-filter'
 enable_dataset_update=True
 enable_var_select=False
 n_resp_per_prompt=8  #采样次数
@@ -26,7 +26,7 @@ train_prompt_bsz=64
 gen_prompt_bsz=192
 train_prompt_mini_bsz=64
 
-exp_name=${exp_name:-"${score_mode}-test-data-${enable_dataset_update}-select-${enable_var_select}-batch-size-${gen_prompt_bsz}-${sort_prompt_bsz}-${train_prompt_bsz}-${sum_min}-${sum_max}-${filter_min}-${filter_max}-replay-${replay_size}-entropy_coeff-${entropy_coeff}-dataset-${dataset_name}-model-${model_name}"}
+exp_name=${exp_name:-"${score_mode}-d-${enable_dataset_update}-s-${enable_var_select}-b-${gen_prompt_bsz}-${sort_prompt_bsz}-${train_prompt_bsz}-${sum_min}${sum_max}${filter_min}${filter_max}-dataset-${dataset_name}-model-${model_name}"}
 # exp_name=${exp_name:-"Test"}
 adv_estimator=grpo
 
@@ -57,7 +57,7 @@ max_num_gen_batches=10
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/Data-Select-verl"}
 MODEL_PATH=${MODEL_PATH:-"/data2/models/Qwen/${model_name}"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"/data2/xucaijun/DAPO_verl/verl/data/${dataset_name}.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"/data2/xucaijun/Data-Select-verl/ckpts/New-Epoch-filter/None-d-True-s-False-b-192-64-64-1707-dataset-think-MATH-3000-model-Qwen2.5-7B/epoch_30_data.parquet"}
 TEST_FILE=${TEST_FILE:-["/data2/xucaijun/DAPO_verl/verl/data/think_MATH-500_MATH-500-processed.parquet","/data2/xucaijun/DAPO_verl/verl/data/think_aime24_aime24_test.parquet","/data2/xucaijun/DAPO_verl/verl/data/think_amc23_amc23_test.parquet"]}
 
 # Algorithm
@@ -121,7 +121,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${num_gpus} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
