@@ -3,31 +3,33 @@ set -euxo pipefail
 export CUDA_VISIBLE_DEVICES=4,5
 export RAY_TMPDIR="/data2/xucaijun/raytmp"
 
-dataset_name="think-MATH-3000"
+dataset_name="think-MATH-7500"
 model_name="Qwen2.5-7B"
 offload=True
 num_gpus=2
-test_and_save_freq=10
-lr_warmup_steps=0
+
+test_and_save_freq=20
+lr_warmup_steps=10
+lr=1e-6
 entropy_coeff=0
 epoch=1000
-score_mode="None"
-project_name='New-Epoch-filter'
+# score_mode="None"
+project_name='Data-Manage-Test'
 enable_dataset_update=True
-enable_var_select=False
+enable_dynamic_batch_size=False
 n_resp_per_prompt=8  #采样次数
 sum_max=7
 sum_min=1
-filter_max=7
+filter_max=8
 filter_min=0
 replay_size=0
-sort_prompt_bsz=64
-train_prompt_bsz=64
-gen_prompt_bsz=192
-train_prompt_mini_bsz=64
+sort_prompt_bsz=32
+train_prompt_bsz=32
+gen_prompt_bsz=32
+train_prompt_mini_bsz=32
 
-exp_name=${exp_name:-"${score_mode}-d-${enable_dataset_update}-s-${enable_var_select}-b-${gen_prompt_bsz}-${sort_prompt_bsz}-${train_prompt_bsz}-${sum_min}${sum_max}${filter_min}${filter_max}-dataset-${dataset_name}-model-${model_name}"}
-# exp_name=${exp_name:-"Test"}
+exp_name=${exp_name:-"Dynamic-d-${enable_dataset_update}-ds-${enable_dynamic_batch_size}-r-${replay_size}-b-${gen_prompt_bsz}-${sort_prompt_bsz}-${train_prompt_bsz}-${sum_min}${sum_max}${filter_min}${filter_max}-dataset-${dataset_name}-model-${model_name}"}
+# exp_name=${exp_name:-"None-test-data-True-select-False-batch-size-192-64-64-1-7-0-7-replay-0-entropy_coeff-0-dataset-think-DeepMath-103K-model-Qwen2.5-7B"}
 adv_estimator=grpo
 
 use_kl_in_reward=False
@@ -36,15 +38,18 @@ use_kl_loss=False
 kl_loss_coef=0.0
 
 clip_ratio_low=0.2
-clip_ratio_high=0.28
+clip_ratio_high=0.2
 
 max_prompt_length=$((1024 ))
 max_response_length=$((1024 * 7))
-enable_overlong_buffer=True
-overlong_buffer_len=$((1024))
+
+enable_overlong_buffer=False
+overlong_buffer_len=0
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
+# loss_agg_mode="seq-mean-token-sum"
+
 enable_filter_groups=True
 filter_groups_metric=acc
 max_num_gen_batches=10
@@ -57,7 +62,7 @@ max_num_gen_batches=10
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/Data-Select-verl"}
 MODEL_PATH=${MODEL_PATH:-"/data2/models/Qwen/${model_name}"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"/data2/xucaijun/Data-Select-verl/ckpts/New-Epoch-filter/None-d-True-s-False-b-192-64-64-1707-dataset-think-MATH-3000-model-Qwen2.5-7B/epoch_30_data.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"/data2/xucaijun/DAPO_verl/verl/data/${dataset_name}.parquet"}
 TEST_FILE=${TEST_FILE:-["/data2/xucaijun/DAPO_verl/verl/data/think_MATH-500_MATH-500-processed.parquet","/data2/xucaijun/DAPO_verl/verl/data/think_aime24_aime24_test.parquet","/data2/xucaijun/DAPO_verl/verl/data/think_amc23_amc23_test.parquet"]}
 
 # Algorithm
@@ -73,6 +78,8 @@ sp_size=1
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$((max_prompt_length + max_response_length))
 infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
+
+expect_bsz=$((train_prompt_bsz * n_resp_per_prompt))
 
 PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     data.train_files="${TRAIN_FILE}" \
@@ -90,6 +97,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
+    +actor_rollout_ref.actor.expect_train_size=${expect_bsz} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
     actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high} \
@@ -111,9 +119,9 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr=${lr} \
     actor_rollout_ref.actor.optim.lr_warmup_steps=${lr_warmup_steps} \
-    actor_rollout_ref.actor.optim.weight_decay=0.1 \
+    actor_rollout_ref.actor.optim.weight_decay=0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${offload} \
@@ -157,7 +165,6 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     +trainer.filter_min=${filter_min} \
     +trainer.max_actor_ckpt_to_keep=1 \
     +trainer.enable_dataset_update=${enable_dataset_update} \
-    +trainer.enable_var_select=${enable_var_select} \
     +trainer.replay_buffer_size=${replay_size} \
-    +trainer.score_mode=${score_mode}
+    +trainer.enable_dynamic_batch_size=${enable_dynamic_batch_size} \
 

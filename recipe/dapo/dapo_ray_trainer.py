@@ -15,7 +15,7 @@
 FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
-
+import random
 import uuid
 from pprint import pprint
 from copy import deepcopy
@@ -215,8 +215,9 @@ class RayDAPOTrainer(RayPPOTrainer):
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
-        sample_steps=0
-        t0 = time.perf_counter()
+        # sample_steps=0
+        rollout_times = 0
+        gradient_times = 0
         self.global_steps = 0
         batch_size=self.config.data.get('gen_batch_size',self.config.data.train_batch_size)
         # load checkpoint before doing anything
@@ -241,14 +242,14 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         timing_raw = defaultdict(float)
         batch = None
-        if self.config.trainer.get('enable_var_select', False):
-            pid_var_dict ={}
+        # if self.config.trainer.get('enable_var_select', False):
+        #     pid_var_dict ={}
         num_prompt_in_batch = 0
         num_gen_batches = 0
 
         #self.train_dataloader.next_iter_state = None
         trainer_dataloader = self.train_dataloader
-        score_mode= self.config.trainer.get('score_mode', 'var')
+        # score_mode= self.config.trainer.get('score_mode', 'var')
         for epoch in range(self.config.trainer.total_epochs):
             if self.config.trainer.get('enable_dataset_update', False):
                 epoch_records = []
@@ -270,7 +271,8 @@ class RayDAPOTrainer(RayPPOTrainer):
                     continue
 
                 metrics = {}
-                sample_steps    +=1
+                # sample_steps    +=1
+                rollout_times += test_size
                 num_gen_batches += 1
                 # pop those keys for generation
                 if "multi_modal_data" in new_batch.non_tensor_batch.keys():
@@ -347,19 +349,19 @@ class RayDAPOTrainer(RayPPOTrainer):
 
 
                     new_batch.batch["response_mask"] = compute_response_mask(new_batch)
-                    if score_mode.startswith("entropy"):
-                        with _timer("entropy_select", timing_raw):
-                            # old_log_prob = self.actor_rollout_wg.compute_log_prob(new_batch)
-                            # entropys        = old_log_prob.batch["entropys"]        # [B, L]
-                            response_masks  = new_batch.batch["response_mask"]  # [B, L] 0/1
+                    # if score_mode.startswith("entropy"):
+                    #     with _timer("entropy_select", timing_raw):
+                    #         # old_log_prob = self.actor_rollout_wg.compute_log_prob(new_batch)
+                    #         # entropys        = old_log_prob.batch["entropys"]        # [B, L]
+                    #         response_masks  = new_batch.batch["response_mask"]  # [B, L] 0/1
 
-                            # ent_sum  = (entropys * response_masks).sum(dim=-1)                        # [B]
-                            tok_cnt  = response_masks.sum(dim=-1).clamp(min=1)                        # [B]
-                            # avg_ent  = ent_sum / tok_cnt                                              # [B]
+                    #         # ent_sum  = (entropys * response_masks).sum(dim=-1)                        # [B]
+                    #         tok_cnt  = response_masks.sum(dim=-1).clamp(min=1)                        # [B]
+                    #         # avg_ent  = ent_sum / tok_cnt                                              # [B]
 
-                            # new_batch.non_tensor_batch["entropys_avg"] = avg_ent.cpu().numpy()
+                    #         # new_batch.non_tensor_batch["entropys_avg"] = avg_ent.cpu().numpy()
 
-                            new_batch.non_tensor_batch['entropys_avg'] = tok_cnt.cpu().numpy() 
+                    #         new_batch.non_tensor_batch['entropys_avg'] = tok_cnt.cpu().numpy() 
 
 
                     if not self.config.algorithm.filter_groups.enable:
@@ -391,17 +393,17 @@ class RayDAPOTrainer(RayPPOTrainer):
                         ]
                         num_prompt_in_batch += len(kept_prompt_uids)
 
-                        if score_mode.startswith("entropy"):
-                            prompt_entropys_avg_list = defaultdict(list)
-                            for uid, metric_val in zip(new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch["entropys_avg"]):
-                                prompt_entropys_avg_list[uid].append(metric_val)
-                            prompt_entropys_metric = {}
-                            if score_mode=="entropy_max":
-                                for prompt_uid, entropys in prompt_entropys_avg_list.items():
-                                    prompt_entropys_metric[prompt_uid] = sum(entropys) / len(entropys)
-                            elif score_mode=="entropy_var":
-                                for prompt_uid, entropys in prompt_entropys_avg_list.items():
-                                    prompt_entropys_metric[prompt_uid] = np.var(entropys)
+                        # if score_mode.startswith("entropy"):
+                        #     prompt_entropys_avg_list = defaultdict(list)
+                        #     for uid, metric_val in zip(new_batch.non_tensor_batch["uid"], new_batch.non_tensor_batch["entropys_avg"]):
+                        #         prompt_entropys_avg_list[uid].append(metric_val)
+                        #     prompt_entropys_metric = {}
+                        #     if score_mode=="entropy_max":
+                        #         for prompt_uid, entropys in prompt_entropys_avg_list.items():
+                        #             prompt_entropys_metric[prompt_uid] = sum(entropys) / len(entropys)
+                        #     elif score_mode=="entropy_var":
+                        #         for prompt_uid, entropys in prompt_entropys_avg_list.items():
+                        #             prompt_entropys_metric[prompt_uid] = np.var(entropys)
 
 
                         visit_prompt_uids = set()
@@ -411,45 +413,62 @@ class RayDAPOTrainer(RayPPOTrainer):
                             if self.config.trainer.get('enable_dataset_update', False) and (traj_from_prompt_uid not in visit_prompt_uids):
                                 epoch_records.append(
                                     self._make_record_for_parquet(
-                                        new_batch, idx, metric_sum_val,self.global_steps,new_batch.non_tensor_batch["entropys_avg"][idx] if score_mode.startswith("entropy") else None
+                                        new_batch, idx, metric_sum_val,self.global_steps,None
                                     )
                                 )
                                 visit_prompt_uids.add(traj_from_prompt_uid)
                             if traj_from_prompt_uid in kept_prompt_uids:
                                 kept_traj_idxs.append(idx)
-                                if self.config.trainer.get('enable_var_select', False):
-                                    if score_mode.startswith("entropy"):
-                                        score = prompt_entropys_metric[traj_from_prompt_uid]
-                                        pid_var_dict[traj_from_prompt_uid] = score
-                                    else:
-                                        tmp_list = list(new_batch.non_tensor_batch['metric_list'][idx])
-                                        tmp_list.append(metric_sum_val)
-                                        score = sample_score(tmp_list,n=self.config.actor_rollout_ref.rollout.n,mode=score_mode)
-                                        pid_var_dict[traj_from_prompt_uid] = score
-                        new_batch = new_batch[kept_traj_idxs]
+                                # if self.config.trainer.get('enable_var_select', False):
+                                #     if score_mode.startswith("entropy"):
+                                #         score = prompt_entropys_metric[traj_from_prompt_uid]
+                                #         pid_var_dict[traj_from_prompt_uid] = score
+                                #     else:
+                                #         tmp_list = list(new_batch.non_tensor_batch['metric_list'][idx])
+                                #         tmp_list.append(metric_sum_val)
+                                #         score = sample_score(tmp_list,n=self.config.actor_rollout_ref.rollout.n,mode=score_mode)
+                                #         pid_var_dict[traj_from_prompt_uid] = score
+                        
+                        dataset_metrics={}
+                        dataset_metrics["dataset/batch_len"] = len(kept_traj_idxs)
+                        logger.log(data=dataset_metrics, step=self.global_steps)
+
+
+                        if self.config.trainer.get('enable_dynamic_batch_size', False):
+                            new_batch = new_batch[kept_traj_idxs]
+                        
+                        new_batch.meta_info["alpha"]=len(new_batch)/(self.config.actor_rollout_ref.rollout.n * self.config.data.train_batch_size)
                         if batch is None:
                             batch = new_batch
                         else:
                             batch = DataProto.concat([batch, new_batch])
 
-                        prompt_bsz = self.config.data.train_batch_size
-                        sort_prompt_bsz = self.config.data.get('sort_prompt_bsz',prompt_bsz)
-                        if num_prompt_in_batch < sort_prompt_bsz:
-                            print(f"{num_prompt_in_batch=} < {sort_prompt_bsz=}")
-                            max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
-                            if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
-                                print(f"{num_gen_batches=}. Keep generating...")
-                                continue
-                            else:
-                                raise ValueError(f"{num_gen_batches=} >= {max_num_gen_batches=}." + " Generated too many. Please check if your data are too difficult." + " You could also try set max_num_gen_batches=0 to enable endless trials.")
-                        else:
-                            # Align the batch
-                            if self.config.trainer.get('enable_var_select', False):
-                                n_roll=self.config.actor_rollout_ref.rollout.n
-                                batch = self.var_select(batch,n=n_roll,dst_batch_size=prompt_bsz,pid_var_dict=pid_var_dict)
-                            else:
-                                traj_bsz = prompt_bsz * self.config.actor_rollout_ref.rollout.n
-                                batch = batch[:traj_bsz]
+
+                        
+                        gradient_times += len(new_batch)
+                        if len(new_batch) == 0:
+                            print(f"Warning: No valid prompts in the batch. Skipping to next generation batch.")
+                            continue
+                        
+
+                        # prompt_bsz = self.config.data.train_batch_size
+                        # sort_prompt_bsz = self.config.data.get('sort_prompt_bsz',prompt_bsz)
+                        # if num_prompt_in_batch < sort_prompt_bsz:
+                        #     print(f"{num_prompt_in_batch=} < {sort_prompt_bsz=}")
+                        #     max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
+                        #     if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
+                        #         print(f"{num_gen_batches=}. Keep generating...")
+                        #         continue
+                        #     else:
+                        #         raise ValueError(f"{num_gen_batches=} >= {max_num_gen_batches=}." + " Generated too many. Please check if your data are too difficult." + " You could also try set max_num_gen_batches=0 to enable endless trials.")
+                        # else:
+                        #     # Align the batch
+                        #     if self.config.trainer.get('enable_var_select', False):
+                        #         n_roll=self.config.actor_rollout_ref.rollout.n
+                        #         batch = self.var_select(batch,n=n_roll,dst_batch_size=prompt_bsz,pid_var_dict=pid_var_dict)
+                        #     else:
+                        #         traj_bsz = prompt_bsz * self.config.actor_rollout_ref.rollout.n
+                        #         batch = batch[:traj_bsz]
 
                     # === Updating ===
 
@@ -538,15 +557,14 @@ class RayDAPOTrainer(RayPPOTrainer):
                 batch = None
                 num_prompt_in_batch = 0
                 num_gen_batches = 0
-                if self.config.trainer.get('enable_var_select', False):
-                    pid_var_dict ={}
+                # if self.config.trainer.get('enable_var_select', False):
+                #     pid_var_dict ={}
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
-                logger.log(data=add_prefix_in_dict(metrics, "sample_steps/"), step=sample_steps)
-                wall_sec = int(time.perf_counter() - t0)
-                logger.log(data=add_prefix_in_dict(metrics, "spend_time/"), step=wall_sec)
+                logger.log(data=add_prefix_in_dict(metrics, "rollout_times/"), step=rollout_times)
+                logger.log(data=add_prefix_in_dict(metrics, "gradient_times/"), step=gradient_times)
 
                 if is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")
@@ -576,6 +594,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                 buffer_size = min(self.config.trainer.replay_buffer_size,len(next_replay_buffer))
                 epoch_records = epoch_records + next_replay_buffer[:buffer_size]
                 next_replay_buffer = next_replay_buffer[buffer_size:]
+                
+                # select_buffer=random.sample(next_replay_buffer,buffer_size)
+                # epoch_records = epoch_records + select_buffer
+                # next_replay_buffer = [item for item in next_replay_buffer if item not in select_buffer]
 
                 print(f"get buffer size {buffer_size} records from replay buffer.")
                 print(f"Left {len(epoch_records)} records after filtering.") 
@@ -624,16 +646,16 @@ class RayDAPOTrainer(RayPPOTrainer):
                 replay_buffer.append(record)
         return filtered_records,replay_buffer
     
-    def var_select(self, batch,n, dst_batch_size: int, pid_var_dict: dict):
-        top_prompt_ids = [
-            pid for pid, _ in sorted(
-                pid_var_dict.items(), key=lambda kv: kv[1], reverse=True
-            )[:dst_batch_size]
-        ]
-        selected_indices = [idx for idx, uid in enumerate(batch.non_tensor_batch['uid']) if uid in top_prompt_ids]
-        assert dst_batch_size*n == len(selected_indices)
-        new_batch = batch[selected_indices]
-        return new_batch
+    # def var_select(self, batch,n, dst_batch_size: int, pid_var_dict: dict):
+    #     top_prompt_ids = [
+    #         pid for pid, _ in sorted(
+    #             pid_var_dict.items(), key=lambda kv: kv[1], reverse=True
+    #         )[:dst_batch_size]
+    #     ]
+    #     selected_indices = [idx for idx, uid in enumerate(batch.non_tensor_batch['uid']) if uid in top_prompt_ids]
+    #     assert dst_batch_size*n == len(selected_indices)
+    #     new_batch = batch[selected_indices]
+    #     return new_batch
 
 
     def _load_replay_buffer(self,path) -> list[dict]:

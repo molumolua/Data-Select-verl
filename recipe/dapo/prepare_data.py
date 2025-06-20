@@ -59,7 +59,7 @@ def prepare_question(question,prompt_type="TEST"):
     return prompt_list
 
 if __name__ == "__main__":
-    keep_size=3000
+    keep_size=7500
     data_source = f"think_{keep_size}"  # "think_MATH-500" or "dapo_MATH-500"
     repeat_time= 1
     random.seed(1)  # For reproducibility

@@ -336,7 +336,7 @@ class DataParallelPPOActor(BasePPOActor):
             dataloader = data.select(select_keys, non_tensor_select_keys).chunk(num_mini_batches)
         else:
             dataloader = batch.split(self.config.ppo_mini_batch_size)
-
+        alpha=data.meta_info.get("alpha", 1.0)  # alpha is used to scale the loss, default is 1.0
         metrics = {}
         for epoch in range(self.config.ppo_epochs):
             for batch_idx, data in enumerate(dataloader):
@@ -416,11 +416,14 @@ class DataParallelPPOActor(BasePPOActor):
                         metrics["actor/kl_loss"] = kl_loss.detach().item()
                         metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
+
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
                     else:
                         loss = policy_loss / self.gradient_accumulation
+                    
+                    loss = loss * alpha
                     loss.backward()
 
                     data = {
@@ -428,6 +431,7 @@ class DataParallelPPOActor(BasePPOActor):
                         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
                         "actor/ppo_kl": ppo_kl.detach().item(),
                         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                        "actor/alpha": alpha,
                     }
                     append_to_dict(metrics, data)
 
