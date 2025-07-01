@@ -69,33 +69,33 @@ def collate_fn(data_list: list[dict]) -> dict:
 
     return {**tensors, **non_tensors}
 
-def sample_score(arr, n,beta=0.5, eps=0.1,mode="var"):
-    #高分优先
-    arr = np.asarray(arr, dtype=np.float32)
-    if mode == "var":
-        if len(arr) <2:
-            return n
-        var = np.var(arr) / (n**2) 
-        return var   #优先算方差最大的
-    elif mode == "max":
-        return arr[-1]
-    elif mode == "min":
-        return -arr[-1]
-    elif mode == "mean":
-        if len(arr) <2:
-            return n
-        return - abs(n/2 - arr[-1])  #优先算reward最靠近中间的
-    elif mode == "diff":
-        # 学习 or 遗忘
-        if len(arr) < 2:
-            return n
-        mean = np.mean(arr[:-1])
-        diff = abs(arr[-1] - mean) #优先算能够使得方差变化最大的
-        return diff
-    else:
-        var = np.var(arr) / (n**2) 
-        inv_len = 1.0 / (len(arr) + eps)
-        return (var + eps) ** beta * (inv_len + eps) ** (1 - beta)
+# def sample_score(arr, n,beta=0.5, eps=0.1,mode="var"):
+#     #高分优先
+#     arr = np.asarray(arr, dtype=np.float32)
+#     if mode == "var":
+#         if len(arr) <2:
+#             return n
+#         var = np.var(arr) / (n**2) 
+#         return var   #优先算方差最大的
+#     elif mode == "max":
+#         return arr[-1]
+#     elif mode == "min":
+#         return -arr[-1]
+#     elif mode == "mean":
+#         if len(arr) <2:
+#             return n
+#         return - abs(n/2 - arr[-1])  #优先算reward最靠近中间的
+#     elif mode == "diff":
+#         # 学习 or 遗忘
+#         if len(arr) < 2:
+#             return n
+#         mean = np.mean(arr[:-1])
+#         diff = abs(arr[-1] - mean) #优先算能够使得方差变化最大的
+#         return diff
+#     else:
+#         var = np.var(arr) / (n**2) 
+#         inv_len = 1.0 / (len(arr) + eps)
+#         return (var + eps) ** beta * (inv_len + eps) ** (1 - beta)
 
 class RayDAPOTrainer(RayPPOTrainer):
     def _create_dataloader(self):
@@ -216,6 +216,8 @@ class RayDAPOTrainer(RayPPOTrainer):
             config=OmegaConf.to_container(self.config, resolve=True),
         )
         # sample_steps=0
+        t0 = time.perf_counter()
+        
         rollout_times = 0
         gradient_times = 0
         self.global_steps = 0
@@ -436,42 +438,43 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                         if self.config.trainer.get('enable_dynamic_batch_size', False):
                             new_batch = new_batch[kept_traj_idxs]
-                        
-                        new_batch.meta_info["alpha"]=len(new_batch)/(self.config.actor_rollout_ref.rollout.n * self.config.data.train_batch_size)
-                        if batch is None:
-                            batch = new_batch
+                            new_batch.meta_info["alpha"]=len(new_batch)/(self.config.actor_rollout_ref.rollout.n * self.config.data.train_batch_size)
                         else:
+                            new_batch.meta_info["alpha"]=1.0
+                        
+                        if batch and self.config.trainer.get('enable_dynamic_batch_size', False):
                             batch = DataProto.concat([batch, new_batch])
-
+                        else:
+                            batch = new_batch
 
                         
                         gradient_times += len(new_batch)
-                        if len(new_batch) == 0:
+                        
+                        
+                        if self.config.trainer.get('enable_dynamic_sample', False):
+                            prompt_bsz = self.config.data.train_batch_size
+                            sort_prompt_bsz = self.config.data.get('sort_prompt_bsz',prompt_bsz)
+                            if num_prompt_in_batch < sort_prompt_bsz:
+                                print(f"{num_prompt_in_batch=} < {sort_prompt_bsz=}")
+                                max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
+                                if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
+                                    print(f"{num_gen_batches=}. Keep generating...")
+                                    continue
+                                else:
+                                    raise ValueError(f"{num_gen_batches=} >= {max_num_gen_batches=}." + " Generated too many. Please check if your data are too difficult." + " You could also try set max_num_gen_batches=0 to enable endless trials.")
+                            else:
+                                traj_bsz = prompt_bsz * self.config.actor_rollout_ref.rollout.n
+                                dataset_metrics={}
+                                dataset_metrics["dataset/dropout_len"] = len(batch)-traj_bsz
+                                logger.log(data=dataset_metrics, step=self.global_steps)
+                                batch = batch[:traj_bsz]
+
+                        if len(batch) == 0:
                             print(f"Warning: No valid prompts in the batch. Skipping to next generation batch.")
                             continue
-                        
-
-                        # prompt_bsz = self.config.data.train_batch_size
-                        # sort_prompt_bsz = self.config.data.get('sort_prompt_bsz',prompt_bsz)
-                        # if num_prompt_in_batch < sort_prompt_bsz:
-                        #     print(f"{num_prompt_in_batch=} < {sort_prompt_bsz=}")
-                        #     max_num_gen_batches = self.config.algorithm.filter_groups.max_num_gen_batches
-                        #     if max_num_gen_batches <= 0 or num_gen_batches < max_num_gen_batches:
-                        #         print(f"{num_gen_batches=}. Keep generating...")
-                        #         continue
-                        #     else:
-                        #         raise ValueError(f"{num_gen_batches=} >= {max_num_gen_batches=}." + " Generated too many. Please check if your data are too difficult." + " You could also try set max_num_gen_batches=0 to enable endless trials.")
-                        # else:
-                        #     # Align the batch
-                        #     if self.config.trainer.get('enable_var_select', False):
-                        #         n_roll=self.config.actor_rollout_ref.rollout.n
-                        #         batch = self.var_select(batch,n=n_roll,dst_batch_size=prompt_bsz,pid_var_dict=pid_var_dict)
-                        #     else:
-                        #         traj_bsz = prompt_bsz * self.config.actor_rollout_ref.rollout.n
-                        #         batch = batch[:traj_bsz]
 
                     # === Updating ===
-
+                    batch.batch["response_mask"] = compute_response_mask(batch)
 
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
@@ -481,7 +484,6 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
- 
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
@@ -565,6 +567,9 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                 logger.log(data=add_prefix_in_dict(metrics, "rollout_times/"), step=rollout_times)
                 logger.log(data=add_prefix_in_dict(metrics, "gradient_times/"), step=gradient_times)
+
+                wall_sec = int(time.perf_counter() - t0)
+                logger.log(data=add_prefix_in_dict(metrics, "spend_time/"), step=wall_sec)
 
                 if is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")

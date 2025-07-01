@@ -2,8 +2,8 @@ from datasets import load_dataset
 import os
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 import pandas as pd
-from verl.utils.reward_score.math import *
-from verl.utils.reward_score.math_dapo import normalize_final_answer
+# from verl.utils.reward_score.math import *
+# from verl.utils.reward_score.math_dapo import normalize_final_answer
 import json
 import random
 def load_json(path):
@@ -59,13 +59,13 @@ def prepare_question(question,prompt_type="TEST"):
     return prompt_list
 
 if __name__ == "__main__":
-    keep_size=7500
-    data_source = f"think_{keep_size}"  # "think_MATH-500" or "dapo_MATH-500"
+    keep_size=1000
+    data_source = f"think_mui_math_{keep_size}"  # "think_MATH-500" or "dapo_MATH-500"
     repeat_time= 1
     random.seed(1)  # For reproducibility
     # 加载数据集的 train 部分
-    dataset = load_dataset("DigitalLearningGmbH/MATH-lighteval",split="train")
-    save_path = f"/data2/xucaijun/DAPO_verl/verl/data/think-MATH-{keep_size}.parquet"
+    # dataset = load_dataset("DigitalLearningGmbH/MATH-lighteval",split="train")
+    # save_path = f"/data2/xucaijun/DAPO_verl/verl/data/think-MATH-{keep_size}.parquet"
     # dataset = load_dataset("HuggingFaceH4/MATH-500",split="test")
     # save_path = f"/data2/xucaijun/DAPO_verl/verl/data/{data_source}_{keep_size}_MATH-500-processed.parquet"
     # dataset = load_json("/data2/xucaijun/My-Math-Generator/outputs/7b_rejected_first_filter_1-4.json")
@@ -78,16 +78,25 @@ if __name__ == "__main__":
 
     # df = pd.read_parquet(f"/data2/xucaijun/DAPO_verl/verl/data/think-DeepMath-103K.parquet")
     # dataset = df.to_dict(orient="records") 
-    # dataset = load_dataset("zwhe99/DeepMath-103K",split="train")
-    # save_path = f"/data2/xucaijun/DAPO_verl/verl/data/think-DeepMath-{keep_size}.parquet"
+
+    dataset = load_jsonl(f"/data2/xucaijun/MUI-Eval/neuron_and_sae/greedy_sample/qwen2.5-7b/math_topk_{keep_size}.jsonl")
+    # dataset = load_dataset("Open-Reasoner-Zero/orz_math_72k_collection_extended",split="train")
+    save_path = f"/data2/xucaijun/DAPO_verl/verl/data/think-mui-MATH-{keep_size}.parquet"
 
     processed_data = []
 
     for i,item in enumerate(dataset):
-        question = item['problem']  # Extract the problem
-        solution = item['solution']  # Extract the solution
+        #question = item['problem']  # Extract the problem
+        # solution = item['solution']  # Extract the solution
         # solution = f"\\boxed{{{item['answer']}}}"  # Add boxed to the solution
         # Generate the prompt and answer
+        # question = item['0']["value"]
+        # solution = f"\\boxed{{{item['1']['ground_truth']['value']}}}"
+
+        question = item['question'][68:-11]
+        solution = f"\\boxed{{{item['answer']}}}"
+
+
         prompt = prepare_question(question,prompt_type=data_source)
         answer = extract_answer(solution,extract_type=data_source)
         if i ==0 :
@@ -107,9 +116,40 @@ if __name__ == "__main__":
             "entropy_list":[],
             "metric_sum":0
         })
+
+    # dataset = load_json("/data2/xucaijun/DAPO_verl/verl/data/orz_math_57k_collection.json")
+
+    # for i,item in enumerate(dataset):
+    #     #question = item['problem']  # Extract the problem
+    #     # solution = item['solution']  # Extract the solution
+    #     # solution = f"\\boxed{{{item['answer']}}}"  # Add boxed to the solution
+    #     # Generate the prompt and answer
+    #     question = item[0]["value"]
+    #     solution = f"\\boxed{{{item[1]['ground_truth']['value']}}}"
+    #     prompt = prepare_question(question,prompt_type=data_source)
+    #     answer = extract_answer(solution,extract_type=data_source)
+    #     if i ==0 :
+    #         print(f"Prompt: {prompt}")
+    #         print(f"Answer: {answer}")
+    #     if len(answer['ground_truth'])==0:
+    #         print(f"Error: No ground truth found for solution: {solution}")
+    #         continue
+    #     # Append to the processed data
+    #     processed_data.append({
+    #         'prompt': prompt,
+    #         'reward_model': answer,
+    #         "data_source": data_source,
+    #         "extra_info":{"index": i},
+    #         "metric_list": [],
+    #         "step_list":[],
+    #         "entropy_list":[],
+    #         "metric_sum":0
+    #     })
+
     if keep_size:
         random.shuffle(processed_data)
         processed_data = processed_data[:keep_size]
+
     processed_data = processed_data * repeat_time
     processed_df = pd.DataFrame(processed_data)
     processed_df.to_parquet(save_path)

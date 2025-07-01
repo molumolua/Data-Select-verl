@@ -3,7 +3,7 @@ set -euxo pipefail
 export CUDA_VISIBLE_DEVICES=4,5
 export RAY_TMPDIR="/data2/xucaijun/raytmp"
 
-dataset_name="think-MATH-7500"
+dataset_name="think-mui-MATH-3000"
 model_name="Qwen2.5-7B"
 offload=True
 num_gpus=2
@@ -14,13 +14,14 @@ lr=1e-6
 entropy_coeff=0
 epoch=1000
 # score_mode="None"
-project_name='Data-Manage-Test'
+project_name='Balance-Debug'
 enable_dataset_update=True
-enable_dynamic_batch_size=False
+enable_dynamic_batch_size=True
+enable_dynamic_sample=False
 n_resp_per_prompt=8  #采样次数
 sum_max=7
 sum_min=1
-filter_max=8
+filter_max=7
 filter_min=0
 replay_size=0
 sort_prompt_bsz=32
@@ -28,7 +29,7 @@ train_prompt_bsz=32
 gen_prompt_bsz=32
 train_prompt_mini_bsz=32
 
-exp_name=${exp_name:-"Dynamic-d-${enable_dataset_update}-ds-${enable_dynamic_batch_size}-r-${replay_size}-b-${gen_prompt_bsz}-${sort_prompt_bsz}-${train_prompt_bsz}-${sum_min}${sum_max}${filter_min}${filter_max}-dataset-${dataset_name}-model-${model_name}"}
+exp_name=${exp_name:-"Dynamic-d-${enable_dataset_update}-ds-${enable_dynamic_batch_size}-s-${enable_dynamic_sample}-r-${replay_size}-b-${gen_prompt_bsz}-${sort_prompt_bsz}-${train_prompt_bsz}-${sum_min}${sum_max}${filter_min}${filter_max}-dataset-${dataset_name}-model-${model_name}"}
 # exp_name=${exp_name:-"None-test-data-True-select-False-batch-size-192-64-64-1-7-0-7-replay-0-entropy_coeff-0-dataset-think-DeepMath-103K-model-Qwen2.5-7B"}
 adv_estimator=grpo
 
@@ -52,7 +53,7 @@ loss_agg_mode="token-mean"
 
 enable_filter_groups=True
 filter_groups_metric=acc
-max_num_gen_batches=10
+max_num_gen_batches=100
 
 # # Ray
 # RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
@@ -167,4 +168,5 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     +trainer.enable_dataset_update=${enable_dataset_update} \
     +trainer.replay_buffer_size=${replay_size} \
     +trainer.enable_dynamic_batch_size=${enable_dynamic_batch_size} \
+    +trainer.enable_dynamic_sample=${enable_dynamic_sample} \
 
